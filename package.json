@@ -1,0 +1,35 @@
+{
+  "name": "in-browser-conductor",
+  "version": "0.1.0",
+  "description": "A Conductor OSS compatible workflow engine that runs entirely inside the browser. Drop-in replacement for the Conductor REST API backed by localStorage or SQLite.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "dist/in-browser-conductor.js",
+  "module": "dist/in-browser-conductor.esm.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/in-browser-conductor.esm.js",
+      "default": "./dist/in-browser-conductor.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test",
+    "serve": "node scripts/serve.mjs"
+  },
+  "keywords": [
+    "conductor",
+    "workflow",
+    "orchestration",
+    "browser",
+    "netflix-conductor"
+  ],
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  }
+}

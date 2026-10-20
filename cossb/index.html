@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Conductor — Control Plane</title>
+  <link rel="stylesheet" href="/cossb/console.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">◈</div>
+        <div class="brand-text">
+          <div class="brand-name">Conductor</div>
+          <div class="brand-sub">in-browser · OSS compatible</div>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <a class="nav-item" data-route="/cossb/executions" href="/cossb/executions">
+          <span class="nav-icon">▤</span> Executions
+        </a>
+        <a class="nav-item" data-route="/cossb/workflows" href="/cossb/workflows">
+          <span class="nav-icon">☰</span> Workflow Definitions
+        </a>
+        <a class="nav-item" data-route="/cossb/tasks" href="/cossb/tasks">
+          <span class="nav-icon">⚙</span> Task Definitions
+        </a>
+        <a class="nav-item" data-route="/cossb/queues" href="/cossb/queues">
+          <span class="nav-icon">▦</span> Queues
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div id="engine-status" class="engine-status">
+          <span class="dot"></span> <span>initializing…</span>
+        </div>
+        <div class="engine-note">Runs 100% in your browser · storage: localStorage</div>
+      </div>
+    </aside>
+
+    <main class="content" id="content">
+      <div class="loading">Loading…</div>
+    </main>
+  </div>
+
+  <script src="/cossb/vendor/in-browser-conductor.js"></script>
+  <script src="/cossb/console.js"></script>
+</body>
+</html>
