@@ -60,9 +60,24 @@ export class ConductorServer {
 
   async init() {
     await this.store.init();
+    await this.reload();
+    this._startSweeper();
+  }
+
+  /**
+   * Re-read persisted state from the store and rebuild all in-memory indexes.
+   * Used on boot and by the control plane to pick up changes made by other
+   * tabs sharing the same storage.
+   */
+  async reload() {
+    if (typeof this.store.reload === 'function') await this.store.reload();
+
     this._tasks.clear();
     this._queues.clear();
     this._delayed = [];
+    this._idempotencyIndex.clear();
+    this._taskDefCache.clear();
+    this._eventHandlers.clear();
 
     const workflows = await this.store.list('workflows');
     for (const wf of workflows) {
@@ -76,8 +91,6 @@ export class ConductorServer {
 
     const taskDefs = await this.store.list('taskDefs');
     for (const td of taskDefs) this._taskDefCache.set(td.name, td);
-
-    this._startSweeper();
   }
 
   dispose() {
@@ -237,20 +250,29 @@ export class ConductorServer {
       this.validateWorkflowDef(def);
       this._inlineDefs.set(taskDefKey(def.name, def.version), def);
     } else {
-      if (!request.name) throw new ApplicationException('Workflow name is required');
+      if (!request.name) throw new ApplicationException('Workflow name is required', { status: 400 });
       def = await this.getWorkflowDef(request.name, request.version);
-      if (!def) throw new ApplicationException(`No workflow defined with name ${request.name}, version ${request.version ?? 'latest'}`);
+      if (!def) throw new ApplicationException(`No workflow defined with name ${request.name}, version ${request.version ?? 'latest'}`, { status: 404 });
     }
 
-    // Idempotency: dedupe by (workflow name, idempotencyKey).
+    // Generate the workflow (and its id) up front so the idempotency check and
+    // reservation can share the same synchronous block — closing the
+    // check-then-act race for concurrent starts with the same key.
+    const wf = createWorkflowInstance(def, request);
+
     if (request.idempotencyKey) {
-      const existing = await this._checkIdempotency(def.name, request.idempotencyKey, request.idempotencyStrategy);
+      const existing = await this._acquireIdempotency(
+        def.name, request.idempotencyKey, request.idempotencyStrategy, wf.workflowId
+      );
       if (existing) return existing;
     }
 
-    const wf = createWorkflowInstance(def, request);
-    await this.store.put('workflows', wf.workflowId, wf);
-    if (wf.idempotencyKey) this._indexIdempotencyKey(wf);
+    try {
+      await this.store.put('workflows', wf.workflowId, wf);
+    } catch (e) {
+      if (request.idempotencyKey) this._unindexIdempotencyKey(wf);
+      throw e;
+    }
     this._emit('workflow.started', { workflowId: wf.workflowId, name: wf.workflowName });
     await this._decide(wf.workflowId);
     return wf.workflowId;
@@ -275,43 +297,49 @@ export class ConductorServer {
   }
 
   /**
-   * Apply Conductor's idempotency strategy. Returns an existing workflow id
-   * for RETURN_EXISTING, or null when a new execution should be started.
+   * Atomically check-and-reserve an idempotency key. Returns the id of an
+   * existing workflow for RETURN_EXISTING, or null when the caller should
+   * proceed (the key has been reserved for the supplied new workflow id).
    * Throws ConflictError (409) for FAIL / FAIL_ON_RUNNING conflicts.
    */
-  async _checkIdempotency(name, idempotencyKey, idempotencyStrategy) {
+  async _acquireIdempotency(name, idempotencyKey, idempotencyStrategy, workflowId) {
     const strategy = idempotencyStrategy || IdempotencyStrategy.FAIL;
     if (![IdempotencyStrategy.FAIL, IdempotencyStrategy.RETURN_EXISTING, IdempotencyStrategy.FAIL_ON_RUNNING].includes(strategy)) {
       throw new BadRequestError(`Invalid idempotencyStrategy: ${idempotencyStrategy}`);
     }
 
-    const ids = this._idempotencyIndex.get(this._idempotencyKey(name, idempotencyKey)) || [];
-    const existing = [];
-    for (const id of ids) {
-      const wf = await this.store.get('workflows', id);
-      if (wf) existing.push(wf);
-    }
+    const mapKey = this._idempotencyKey(name, idempotencyKey);
+    const ids = this._idempotencyIndex.get(mapKey) || [];
 
     if (strategy === IdempotencyStrategy.RETURN_EXISTING) {
-      return existing.length ? existing[0].workflowId : null;
-    }
-    if (strategy === IdempotencyStrategy.FAIL) {
-      if (existing.length) {
+      if (ids.length) return ids[0];
+    } else if (strategy === IdempotencyStrategy.FAIL) {
+      if (ids.length) {
         throw new ConflictError(
           `Workflow with idempotencyKey '${idempotencyKey}' is already running or completed`
         );
       }
-      return null;
-    }
-    // FAIL_ON_RUNNING: only RUNNING or PAUSED executions block a new start.
-    const running = existing.filter(
-      (wf) => wf.status === WorkflowStatus.RUNNING || wf.status === WorkflowStatus.PAUSED
-    );
-    if (running.length) {
-      throw new ConflictError(
-        `Workflow with idempotencyKey '${idempotencyKey}' is already running`
+    } else {
+      // FAIL_ON_RUNNING: only RUNNING or PAUSED executions block a new start.
+      const existing = [];
+      for (const id of ids) {
+        const wf = await this.store.get('workflows', id);
+        if (wf) existing.push(wf);
+      }
+      const running = existing.filter(
+        (wf) => wf.status === WorkflowStatus.RUNNING || wf.status === WorkflowStatus.PAUSED
       );
+      if (running.length) {
+        throw new ConflictError(
+          `Workflow with idempotencyKey '${idempotencyKey}' is already running`
+        );
+      }
     }
+
+    // Reserve synchronously (re-read the list so concurrent reserves append).
+    const current = this._idempotencyIndex.get(mapKey) || [];
+    if (!current.includes(workflowId)) current.push(workflowId);
+    this._idempotencyIndex.set(mapKey, current);
     return null;
   }
 
@@ -848,13 +876,34 @@ export class ConductorServer {
   }
 
   async _handleTaskTimeout(wf, task, taskDef, wfDef) {
-    const policy = taskDef.timeoutPolicy || TimeoutPolicy.TIME_OUT_WF;
-    if (policy === TimeoutPolicy.RETRY) {
-      task.status = TaskStatus.TIMED_OUT;
+    // Honor `optional`: a timed-out optional task continues the workflow.
+    if (task.optional) {
+      task.status = TaskStatus.COMPLETED_WITH_ERRORS;
       task.reasonForIncompletion = 'Task timed out';
       task.endTime = this.now();
+      task.updateTime = this.now();
       await this._saveTask(task);
-      await this._maybeRetry(wf, task, taskDef);
+      await this._decide(wf.workflowId);
+      return;
+    }
+
+    const policy = taskDef.timeoutPolicy || TimeoutPolicy.TIME_OUT_WF;
+    if (policy === TimeoutPolicy.RETRY) {
+      // WAIT tasks are never retried (Conductor never retries a WAIT), and a
+      // retry is only scheduled while attempts remain.
+      const maxRetries = taskDef.retryCount != null ? taskDef.retryCount : 0;
+      if (task.type !== TaskType.WAIT && (task.retryCount || 0) < maxRetries) {
+        task.status = TaskStatus.TIMED_OUT;
+        task.reasonForIncompletion = 'Task timed out';
+        task.endTime = this.now();
+        await this._saveTask(task);
+        await this._maybeRetry(wf, task, taskDef);
+      } else {
+        task.status = TaskStatus.TIMED_OUT;
+        task.reasonForIncompletion = 'Task timed out';
+        await this._saveTask(task);
+        await this._failWorkflow(wf, task, 'Task timed out');
+      }
     } else if (policy === TimeoutPolicy.TIME_OUT_WF) {
       task.status = TaskStatus.TIMED_OUT;
       task.reasonForIncompletion = 'Task timed out';
@@ -1041,14 +1090,23 @@ export class ConductorServer {
 
   async _startSubWorkflow(wf, sub) {
     const rec = latestTaskForRef(wf, sub.taskDef.taskReferenceName);
+    const childRequest = {
+      name: sub.name,
+      version: sub.version,
+      input: sub.inputData,
+      correlationId: sub.correlationId,
+      idempotencyKey: sub.idempotencyKey,
+      idempotencyStrategy: sub.idempotencyStrategy,
+    };
+    if (!sub.fireAndForget) {
+      // SUB_WORKFLOW children are linked back to the parent so their terminal
+      // state can resume it. Fire-and-forget (START_WORKFLOW) children are
+      // not, so a child's completion/failure never affects its parent.
+      childRequest.parentWorkflowId = wf.workflowId;
+      childRequest.parentWorkflowTaskId = sub.taskDef.taskReferenceName;
+    }
     try {
-      const childId = await this.startWorkflow({
-        name: sub.name,
-        version: sub.version,
-        input: sub.inputData,
-        parentWorkflowId: wf.workflowId,
-        parentWorkflowTaskId: sub.taskDef.taskReferenceName,
-      });
+      const childId = await this.startWorkflow(childRequest);
       if (sub.fireAndForget) {
         if (rec) {
           rec.status = TaskStatus.COMPLETED;

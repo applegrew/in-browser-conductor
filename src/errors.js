@@ -31,11 +31,13 @@ export class BadRequestError extends ConductorError {
   }
 }
 
-/** Thrown by workers / inline tasks to fail a task. */
+/** Thrown by workers / inline tasks to fail a task, and by the engine for
+ * request-level errors that should map to a specific HTTP status. */
 export class ApplicationException extends Error {
-  constructor(message, { type = 'ApplicationException', details = null } = {}) {
+  constructor(message, { type = 'ApplicationException', details = null, status = 500 } = {}) {
     super(message);
     this.name = type;
     this.details = details;
+    this.status = status;
   }
 }

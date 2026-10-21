@@ -88,6 +88,7 @@ var TaskType = {
   EXCLUSIVE_JOIN: "EXCLUSIVE_JOIN",
   DO_WHILE: "DO_WHILE",
   SWITCH: "SWITCH",
+  DECISION: "DECISION",
   SUB_WORKFLOW: "SUB_WORKFLOW",
   START_WORKFLOW: "START_WORKFLOW",
   DYNAMIC_FORK: "DYNAMIC_FORK",
@@ -452,6 +453,20 @@ var Decider = class {
   _ctx() {
     return buildContext(this.wf, latestTasksByRef(this.wf));
   }
+  /**
+   * Latest attempt for a reference name, optionally scoped to a loop
+   * iteration. When `iteration` is null (top-level walk) the latest record
+   * across all iterations is returned.
+   */
+  _latestForRef(ref, iteration) {
+    let latest = null;
+    for (const t of this.wf.tasks || []) {
+      if (t.referenceTaskName !== ref) continue;
+      if (iteration != null && t.iteration !== iteration) continue;
+      if (!latest || (t.seq ?? 0) >= (latest.seq ?? 0)) latest = t;
+    }
+    return latest;
+  }
   // ---- helpers ----------------------------------------------------------
   _addRecord(td, { type, status, inputData = {}, outputData = {}, seq = 0, iteration = null, dynamic = false }) {
     const rec = createTaskRecord(this.wf, this.def, td, inputData, {
@@ -475,7 +490,9 @@ var Decider = class {
     this.result.tasks.push({ taskDef, inputData, iteration, dynamic });
   }
   _resolvedType(td) {
-    return td.type === TaskType.FORK ? TaskType.FORK_JOIN : td.type;
+    if (td.type === TaskType.FORK) return TaskType.FORK_JOIN;
+    if (td.type === TaskType.DECISION) return TaskType.SWITCH;
+    return td.type;
   }
   _inputFor(td, iteration = null) {
     const root = this._ctx();
@@ -497,7 +514,7 @@ var Decider = class {
   _process(td, iteration) {
     const type = this._resolvedType(td);
     const ref = td.taskReferenceName;
-    const existing = latestTaskForRef(this.wf, ref);
+    const existing = this._latestForRef(ref, iteration);
     if (!existing) return this._start(td, type, iteration);
     if (existing.status === TaskStatus.COMPLETED || existing.status === TaskStatus.COMPLETED_WITH_ERRORS) {
       return "done";
@@ -517,22 +534,22 @@ var Decider = class {
   _start(td, type, iteration) {
     switch (type) {
       case TaskType.SET_VARIABLE:
-        return this._startSetVariable(td);
+        return this._startSetVariable(td, iteration);
       case TaskType.TERMINATE:
-        return this._startTerminate(td);
+        return this._startTerminate(td, iteration);
       case TaskType.FORK_JOIN:
         return this._startFork(td, iteration);
       case TaskType.JOIN:
       case TaskType.EXCLUSIVE_JOIN:
-        return this._startJoin(td, type);
+        return this._startJoin(td, type, iteration);
       case TaskType.SWITCH:
         return this._startSwitch(td, iteration);
       case TaskType.DO_WHILE:
-        return this._startDoWhile(td);
+        return this._startDoWhile(td, iteration);
       case TaskType.SUB_WORKFLOW:
-        return this._startSubWorkflow(td);
+        return this._startSubWorkflow(td, iteration);
       case TaskType.START_WORKFLOW:
-        return this._startStartWorkflow(td);
+        return this._startStartWorkflow(td, iteration);
       case TaskType.DYNAMIC:
         return this._startDynamic(td, iteration);
       case TaskType.DYNAMIC_FORK:
@@ -542,18 +559,18 @@ var Decider = class {
         return "blocked";
     }
   }
-  _startSetVariable(td) {
-    const vars = this._inputFor(td);
+  _startSetVariable(td, iteration) {
+    const vars = this._inputFor(td, iteration);
     this.wf.variables = { ...this.wf.variables || {}, ...vars || {} };
-    this._addRecord(td, { type: TaskType.SET_VARIABLE, status: TaskStatus.COMPLETED, inputData: vars, outputData: vars });
+    this._addRecord(td, { type: TaskType.SET_VARIABLE, status: TaskStatus.COMPLETED, inputData: vars, outputData: vars, iteration });
     return "continue";
   }
-  _startTerminate(td) {
-    const input = this._inputFor(td);
+  _startTerminate(td, iteration) {
+    const input = this._inputFor(td, iteration);
     const status = input.terminationStatus || "COMPLETED";
-    const output = input.workflowOutput != null ? input.workflowOutput : input.terminationReason ? void 0 : void 0;
+    const output = input.workflowOutput != null ? input.workflowOutput : void 0;
     const reason = input.terminationReason || "";
-    this._addRecord(td, { type: TaskType.TERMINATE, status: TaskStatus.COMPLETED, inputData: input, outputData: input });
+    this._addRecord(td, { type: TaskType.TERMINATE, status: TaskStatus.COMPLETED, inputData: input, outputData: input, iteration });
     this.result.terminates = { status, output, reason };
     return "terminate";
   }
@@ -566,13 +583,13 @@ var Decider = class {
     }).filter(Boolean);
     this.wf.deciderState.forkStack = this.wf.deciderState.forkStack || [];
     this.wf.deciderState.forkStack.push(joinOn);
-    this._addRecord(td, { type: TaskType.FORK_JOIN, status: TaskStatus.COMPLETED });
+    this._addRecord(td, { type: TaskType.FORK_JOIN, status: TaskStatus.COMPLETED, iteration });
     for (const branch of branches) {
       this._walk(branch || [], iteration);
     }
     return "continue";
   }
-  _startJoin(td, type) {
+  _startJoin(td, type, iteration) {
     let joinOn = (td.joinOn || []).slice();
     if (joinOn.length === 0) {
       const stack2 = this.wf.deciderState.forkStack || [];
@@ -583,20 +600,20 @@ var Decider = class {
     this.wf.deciderState.joinOn = this.wf.deciderState.joinOn || {};
     this.wf.deciderState.joinOn[td.taskReferenceName] = joinOn;
     const any = type === TaskType.EXCLUSIVE_JOIN;
-    const done = joinOn.length > 0 && (any ? joinOn.some((ref) => this._refCompleted(ref)) : joinOn.every((ref) => this._refCompleted(ref)));
+    const done = joinOn.length > 0 && (any ? joinOn.some((ref) => this._refCompleted(ref, iteration)) : joinOn.every((ref) => this._refCompleted(ref, iteration)));
     if (!done) return "blocked";
     const output = {};
     for (const ref of joinOn) {
-      const t = latestTaskForRef(this.wf, ref);
+      const t = this._latestForRef(ref, iteration);
       if (t) output[ref] = t.outputData;
     }
-    this._addRecord(td, { type, status: TaskStatus.COMPLETED, outputData: output });
+    this._addRecord(td, { type, status: TaskStatus.COMPLETED, outputData: output, iteration });
     const stack = this.wf.deciderState.forkStack || [];
     if (stack.length) stack.pop();
     return "continue";
   }
-  _refCompleted(ref) {
-    const t = latestTaskForRef(this.wf, ref);
+  _refCompleted(ref, iteration) {
+    const t = this._latestForRef(ref, iteration);
     if (!t) return false;
     return t.status === TaskStatus.COMPLETED || t.status === TaskStatus.COMPLETED_WITH_ERRORS || t.status === TaskStatus.SKIPPED;
   }
@@ -622,55 +639,67 @@ var Decider = class {
     else if (td.defaultCase) chosen = td.defaultCase;
     this.wf.deciderState.switches = this.wf.deciderState.switches || {};
     this.wf.deciderState.switches[td.taskReferenceName] = { caseKey, list: chosen || [] };
-    this._addRecord(td, { type: TaskType.SWITCH, status: TaskStatus.IN_PROGRESS, inputData: { caseValue: caseKey } });
+    this._addRecord(td, { type: TaskType.SWITCH, status: TaskStatus.IN_PROGRESS, inputData: { caseValue: caseKey }, iteration });
     if (!chosen || chosen.length === 0) {
-      const rec = latestTaskForRef(this.wf, td.taskReferenceName);
+      const rec = this._latestForRef(td.taskReferenceName, iteration);
       if (rec) rec.status = TaskStatus.COMPLETED;
       return "continue";
     }
     this._walk(chosen, iteration);
     return "blocked";
   }
-  _startDoWhile(td) {
+  _startDoWhile(td, iteration) {
     this.wf.deciderState.doWhile = this.wf.deciderState.doWhile || {};
     this.wf.deciderState.doWhile[td.taskReferenceName] = { iteration: 0 };
-    this._addRecord(td, { type: TaskType.DO_WHILE, status: TaskStatus.IN_PROGRESS });
+    this._addRecord(td, { type: TaskType.DO_WHILE, status: TaskStatus.IN_PROGRESS, iteration });
     const loopOver = td.loopOver || [];
     if (loopOver.length === 0) {
-      const rec = latestTaskForRef(this.wf, td.taskReferenceName);
+      const rec = this._latestForRef(td.taskReferenceName, iteration);
       if (rec) rec.status = TaskStatus.COMPLETED;
       return "continue";
     }
     this._walk(loopOver, 0);
     return "blocked";
   }
-  _startSubWorkflow(td) {
-    const input = this._inputFor(td);
+  _startSubWorkflow(td, iteration) {
+    const input = this._inputFor(td, iteration);
     const sub = td.subWorkflowParam || {};
     const name = sub.name;
     const version = sub.version;
-    this._addRecord(td, { type: TaskType.SUB_WORKFLOW, status: TaskStatus.IN_PROGRESS, inputData: input });
-    this.result.subworkflows.push({ taskDef: td, inputData: input, name, version });
+    this._addRecord(td, { type: TaskType.SUB_WORKFLOW, status: TaskStatus.IN_PROGRESS, inputData: input, iteration });
+    this.result.subworkflows.push({
+      taskDef: td,
+      inputData: input,
+      name,
+      version,
+      correlationId: sub.correlationId,
+      idempotencyKey: sub.idempotencyKey,
+      idempotencyStrategy: sub.idempotencyStrategy
+    });
     return "blocked";
   }
-  _startStartWorkflow(td) {
-    const input = this._inputFor(td);
+  _startStartWorkflow(td, iteration) {
+    const input = this._inputFor(td, iteration);
     const spec = input.startWorkflow || {};
+    this._addRecord(td, { type: TaskType.START_WORKFLOW, status: TaskStatus.IN_PROGRESS, inputData: input, iteration });
     this.result.subworkflows.push({
       taskDef: td,
       inputData: spec.input || {},
       name: spec.name,
       version: spec.version,
+      correlationId: spec.correlationId,
+      idempotencyKey: spec.idempotencyKey,
+      idempotencyStrategy: spec.idempotencyStrategy,
       fireAndForget: true
     });
     return "blocked";
   }
   _startDynamic(td, iteration) {
-    const input = this._inputFor(td);
+    const input = this._inputFor(td, iteration);
     const nameParam = td.dynamicTaskNameParam || "taskToExecute";
     const taskName = input[nameParam] || td.dynamicTaskName;
     if (!taskName) {
-      this._addRecord(td, { type: TaskType.DYNAMIC, status: TaskStatus.COMPLETED, outputData: input });
+      this._addRecord(td, { type: TaskType.DYNAMIC, status: TaskStatus.COMPLETED, outputData: input, iteration });
       return "continue";
     }
     const taskDef = this.server.getTaskDefSync(taskName) || { name: taskName, type: TaskType.SIMPLE };
@@ -689,12 +718,12 @@ var Decider = class {
     return "blocked";
   }
   _startDynamicFork(td, iteration) {
-    const input = this._inputFor(td);
+    const input = this._inputFor(td, iteration);
     const tasksParam = td.dynamicForkTasksParam || "dynamicTasks";
     const inputParam = td.dynamicForkTasksInputParamName || "dynamicTasksInput";
     const taskSpecs = input[tasksParam] || [];
     const inputs = input[inputParam] || [];
-    this._addRecord(td, { type: TaskType.DYNAMIC_FORK, status: TaskStatus.IN_PROGRESS, inputData: input });
+    this._addRecord(td, { type: TaskType.DYNAMIC_FORK, status: TaskStatus.IN_PROGRESS, inputData: input, iteration });
     this.wf.deciderState.dynamicForks = this.wf.deciderState.dynamicForks || {};
     const childRefs = [];
     taskSpecs.forEach((spec, i) => {
@@ -721,33 +750,33 @@ var Decider = class {
   _advanceContainer(td, type, existing, iteration) {
     switch (type) {
       case TaskType.SWITCH:
-        return this._advanceSwitch(td);
+        return this._advanceSwitch(td, iteration);
       case TaskType.DO_WHILE:
-        return this._advanceDoWhile(td);
+        return this._advanceDoWhile(td, iteration);
       case TaskType.DYNAMIC_FORK:
-        return this._advanceDynamicFork(td);
+        return this._advanceDynamicFork(td, iteration);
       default:
         return "blocked";
     }
   }
-  _advanceSwitch(td) {
+  _advanceSwitch(td, iteration) {
     const info = (this.wf.deciderState.switches || {})[td.taskReferenceName];
     const chosen = info ? info.list : [];
     if (chosen.length === 0) {
-      const rec = latestTaskForRef(this.wf, td.taskReferenceName);
+      const rec = this._latestForRef(td.taskReferenceName, iteration);
       if (rec) rec.status = TaskStatus.COMPLETED;
       return "continue";
     }
-    const done = this._walk(chosen, null);
+    const done = this._walk(chosen, iteration);
     if (done) {
-      const rec = latestTaskForRef(this.wf, td.taskReferenceName);
+      const rec = this._latestForRef(td.taskReferenceName, iteration);
       if (rec) rec.status = TaskStatus.COMPLETED;
       this.result.progress = true;
       return "continue";
     }
     return "blocked";
   }
-  _advanceDoWhile(td) {
+  _advanceDoWhile(td, iteration) {
     const state = (this.wf.deciderState.doWhile || {})[td.taskReferenceName];
     if (!state) return "blocked";
     const loopOver = td.loopOver || [];
@@ -763,7 +792,7 @@ var Decider = class {
       this._walk(loopOver, state.iteration);
       return "blocked";
     }
-    const rec = latestTaskForRef(this.wf, td.taskReferenceName);
+    const rec = this._latestForRef(td.taskReferenceName, iteration);
     if (rec) rec.status = TaskStatus.COMPLETED;
     this.result.progress = true;
     return "continue";
@@ -778,7 +807,7 @@ var Decider = class {
     if (!cond) return false;
     const scope = {};
     for (const inner of loopOver) {
-      const rec = latestTaskForRef(this.wf, inner.taskReferenceName);
+      const rec = this._latestForRef(inner.taskReferenceName, iteration);
       scope[inner.taskReferenceName] = { input: rec ? rec.inputData : {}, output: rec ? rec.outputData : {} };
     }
     const substituted = substitute(cond, { workflow: this._ctx().workflow, ...scope });
@@ -786,12 +815,12 @@ var Decider = class {
     const fn = new Function("$", `"use strict"; return (${cond});`);
     return !!fn(scope);
   }
-  _advanceDynamicFork(td) {
+  _advanceDynamicFork(td, iteration) {
     const info = (this.wf.deciderState.dynamicForks || {})[td.taskReferenceName];
     if (!info) return "blocked";
-    const allDone = info.childRefs.every((ref) => this._refCompleted(ref));
+    const allDone = info.childRefs.every((ref) => this._refCompleted(ref, iteration));
     if (!allDone) return "blocked";
-    const rec = latestTaskForRef(this.wf, td.taskReferenceName);
+    const rec = this._latestForRef(td.taskReferenceName, iteration);
     if (rec) rec.status = TaskStatus.COMPLETED;
     this.result.progress = true;
     return "continue";
@@ -932,10 +961,11 @@ var BadRequestError = class extends ConductorError {
   }
 };
 var ApplicationException = class extends Error {
-  constructor(message, { type = "ApplicationException", details = null } = {}) {
+  constructor(message, { type = "ApplicationException", details = null, status = 500 } = {}) {
     super(message);
     this.name = type;
     this.details = details;
+    this.status = status;
   }
 };
 
@@ -969,9 +999,22 @@ var ConductorServer = class {
   }
   async init() {
     await this.store.init();
+    await this.reload();
+    this._startSweeper();
+  }
+  /**
+   * Re-read persisted state from the store and rebuild all in-memory indexes.
+   * Used on boot and by the control plane to pick up changes made by other
+   * tabs sharing the same storage.
+   */
+  async reload() {
+    if (typeof this.store.reload === "function") await this.store.reload();
     this._tasks.clear();
     this._queues.clear();
     this._delayed = [];
+    this._idempotencyIndex.clear();
+    this._taskDefCache.clear();
+    this._eventHandlers.clear();
     const workflows = await this.store.list("workflows");
     for (const wf of workflows) {
       for (const t of wf.tasks || []) {
@@ -983,7 +1026,6 @@ var ConductorServer = class {
     for (const h of handlers2) this._eventHandlers.set(h.name, h);
     const taskDefs = await this.store.list("taskDefs");
     for (const td of taskDefs) this._taskDefCache.set(td.name, td);
-    this._startSweeper();
   }
   dispose() {
     if (this._sweeper) clearInterval(this._sweeper);
@@ -1118,17 +1160,26 @@ var ConductorServer = class {
       this.validateWorkflowDef(def);
       this._inlineDefs.set(taskDefKey(def.name, def.version), def);
     } else {
-      if (!request.name) throw new ApplicationException("Workflow name is required");
+      if (!request.name) throw new ApplicationException("Workflow name is required", { status: 400 });
       def = await this.getWorkflowDef(request.name, request.version);
-      if (!def) throw new ApplicationException(`No workflow defined with name ${request.name}, version ${request.version ?? "latest"}`);
-    }
-    if (request.idempotencyKey) {
-      const existing = await this._checkIdempotency(def.name, request.idempotencyKey, request.idempotencyStrategy);
-      if (existing) return existing;
+      if (!def) throw new ApplicationException(`No workflow defined with name ${request.name}, version ${request.version ?? "latest"}`, { status: 404 });
     }
     const wf = createWorkflowInstance(def, request);
-    await this.store.put("workflows", wf.workflowId, wf);
-    if (wf.idempotencyKey) this._indexIdempotencyKey(wf);
+    if (request.idempotencyKey) {
+      const existing = await this._acquireIdempotency(
+        def.name,
+        request.idempotencyKey,
+        request.idempotencyStrategy,
+        wf.workflowId
+      );
+      if (existing) return existing;
+    }
+    try {
+      await this.store.put("workflows", wf.workflowId, wf);
+    } catch (e) {
+      if (request.idempotencyKey) this._unindexIdempotencyKey(wf);
+      throw e;
+    }
     this._emit("workflow.started", { workflowId: wf.workflowId, name: wf.workflowName });
     await this._decide(wf.workflowId);
     return wf.workflowId;
@@ -1149,40 +1200,44 @@ var ConductorServer = class {
     else this._idempotencyIndex.delete(k);
   }
   /**
-   * Apply Conductor's idempotency strategy. Returns an existing workflow id
-   * for RETURN_EXISTING, or null when a new execution should be started.
+   * Atomically check-and-reserve an idempotency key. Returns the id of an
+   * existing workflow for RETURN_EXISTING, or null when the caller should
+   * proceed (the key has been reserved for the supplied new workflow id).
    * Throws ConflictError (409) for FAIL / FAIL_ON_RUNNING conflicts.
    */
-  async _checkIdempotency(name, idempotencyKey, idempotencyStrategy) {
+  async _acquireIdempotency(name, idempotencyKey, idempotencyStrategy, workflowId) {
     const strategy = idempotencyStrategy || IdempotencyStrategy.FAIL;
     if (![IdempotencyStrategy.FAIL, IdempotencyStrategy.RETURN_EXISTING, IdempotencyStrategy.FAIL_ON_RUNNING].includes(strategy)) {
       throw new BadRequestError(`Invalid idempotencyStrategy: ${idempotencyStrategy}`);
     }
-    const ids = this._idempotencyIndex.get(this._idempotencyKey(name, idempotencyKey)) || [];
-    const existing = [];
-    for (const id of ids) {
-      const wf = await this.store.get("workflows", id);
-      if (wf) existing.push(wf);
-    }
+    const mapKey = this._idempotencyKey(name, idempotencyKey);
+    const ids = this._idempotencyIndex.get(mapKey) || [];
     if (strategy === IdempotencyStrategy.RETURN_EXISTING) {
-      return existing.length ? existing[0].workflowId : null;
-    }
-    if (strategy === IdempotencyStrategy.FAIL) {
-      if (existing.length) {
+      if (ids.length) return ids[0];
+    } else if (strategy === IdempotencyStrategy.FAIL) {
+      if (ids.length) {
         throw new ConflictError(
           `Workflow with idempotencyKey '${idempotencyKey}' is already running or completed`
         );
       }
-      return null;
-    }
-    const running = existing.filter(
-      (wf) => wf.status === WorkflowStatus.RUNNING || wf.status === WorkflowStatus.PAUSED
-    );
-    if (running.length) {
-      throw new ConflictError(
-        `Workflow with idempotencyKey '${idempotencyKey}' is already running`
+    } else {
+      const existing = [];
+      for (const id of ids) {
+        const wf = await this.store.get("workflows", id);
+        if (wf) existing.push(wf);
+      }
+      const running = existing.filter(
+        (wf) => wf.status === WorkflowStatus.RUNNING || wf.status === WorkflowStatus.PAUSED
       );
+      if (running.length) {
+        throw new ConflictError(
+          `Workflow with idempotencyKey '${idempotencyKey}' is already running`
+        );
+      }
     }
+    const current = this._idempotencyIndex.get(mapKey) || [];
+    if (!current.includes(workflowId)) current.push(workflowId);
+    this._idempotencyIndex.set(mapKey, current);
     return null;
   }
   async executeWorkflow(request, { waitForSeconds = 10, waitUntilTaskRef = null } = {}) {
@@ -1656,13 +1711,30 @@ var ConductorServer = class {
     }
   }
   async _handleTaskTimeout(wf, task, taskDef, wfDef) {
-    const policy = taskDef.timeoutPolicy || TimeoutPolicy.TIME_OUT_WF;
-    if (policy === TimeoutPolicy.RETRY) {
-      task.status = TaskStatus.TIMED_OUT;
+    if (task.optional) {
+      task.status = TaskStatus.COMPLETED_WITH_ERRORS;
       task.reasonForIncompletion = "Task timed out";
       task.endTime = this.now();
+      task.updateTime = this.now();
       await this._saveTask(task);
-      await this._maybeRetry(wf, task, taskDef);
+      await this._decide(wf.workflowId);
+      return;
+    }
+    const policy = taskDef.timeoutPolicy || TimeoutPolicy.TIME_OUT_WF;
+    if (policy === TimeoutPolicy.RETRY) {
+      const maxRetries = taskDef.retryCount != null ? taskDef.retryCount : 0;
+      if (task.type !== TaskType.WAIT && (task.retryCount || 0) < maxRetries) {
+        task.status = TaskStatus.TIMED_OUT;
+        task.reasonForIncompletion = "Task timed out";
+        task.endTime = this.now();
+        await this._saveTask(task);
+        await this._maybeRetry(wf, task, taskDef);
+      } else {
+        task.status = TaskStatus.TIMED_OUT;
+        task.reasonForIncompletion = "Task timed out";
+        await this._saveTask(task);
+        await this._failWorkflow(wf, task, "Task timed out");
+      }
     } else if (policy === TimeoutPolicy.TIME_OUT_WF) {
       task.status = TaskStatus.TIMED_OUT;
       task.reasonForIncompletion = "Task timed out";
@@ -1829,14 +1901,20 @@ var ConductorServer = class {
   }
   async _startSubWorkflow(wf, sub) {
     const rec = latestTaskForRef(wf, sub.taskDef.taskReferenceName);
+    const childRequest = {
+      name: sub.name,
+      version: sub.version,
+      input: sub.inputData,
+      correlationId: sub.correlationId,
+      idempotencyKey: sub.idempotencyKey,
+      idempotencyStrategy: sub.idempotencyStrategy
+    };
+    if (!sub.fireAndForget) {
+      childRequest.parentWorkflowId = wf.workflowId;
+      childRequest.parentWorkflowTaskId = sub.taskDef.taskReferenceName;
+    }
     try {
-      const childId = await this.startWorkflow({
-        name: sub.name,
-        version: sub.version,
-        input: sub.inputData,
-        parentWorkflowId: wf.workflowId,
-        parentWorkflowTaskId: sub.taskDef.taskReferenceName
-      });
+      const childId = await this.startWorkflow(childRequest);
       if (sub.fireAndForget) {
         if (rec) {
           rec.status = TaskStatus.COMPLETED;
@@ -2550,7 +2628,10 @@ var handlers = {
     if (!h) throw new NotFoundError(`Event handler not found: ${c.params.event}`);
     return json(200, h);
   },
-  registerEventHandler: async (c) => empty(200),
+  registerEventHandler: async (c) => {
+    const handler = await c.server.registerEventHandler(c.json());
+    return empty(200);
+  },
   deleteEventHandler: async (c) => {
     await c.server.deleteEventHandler(c.params.event);
     return empty(200);
@@ -2594,7 +2675,7 @@ async function handleHttpRequest(request, server, { basePath = "/api" } = {}) {
   }
 }
 function toErrorResponse(e) {
-  const status = e instanceof ConductorError ? e.status : e instanceof ApplicationException ? 500 : 500;
+  const status = e && e.status ? e.status : 500;
   const message = e && e.message ? e.message : String(e);
   const body = { status, message };
   if (e && e.code) body.code = e.code;
@@ -2823,19 +2904,21 @@ var ConductorWorker = class {
     concurrency = 1,
     pollInterval = 1e3,
     executeTask = null,
-    client = null
+    client = null,
+    onTaskComplete = null
   }) {
     this.taskType = taskType;
+    this.baseURL = baseURL;
     this.workerId = workerId || `worker-${Math.random().toString(36).slice(2, 8)}`;
     this.domain = domain;
     this.concurrency = concurrency;
     this.pollInterval = pollInterval;
     this.executeTask = executeTask;
     this.client = client;
+    this.onTaskComplete = onTaskComplete;
     this._running = false;
     this._timer = null;
     this._inflight = 0;
-    this.onTaskComplete = null;
   }
   _ensureClient() {
     if (!this.client) {
@@ -2904,6 +2987,8 @@ var ConductorWorker = class {
 var Store = class {
   async init() {
   }
+  async reload() {
+  }
   async get() {
     return void 0;
   }
@@ -2966,14 +3051,17 @@ var LocalStorageStore = class extends Store {
     return this.data.get(name);
   }
   async init() {
+    await this.reload();
+  }
+  async reload() {
     if (!this.storage) return;
     const raw = this.storage.getItem(this.storageKey);
+    this.data = createCollections();
     if (!raw) return;
     try {
       const parsed = JSON.parse(raw);
       for (const [coll, entries] of Object.entries(parsed || {})) {
-        const map = /* @__PURE__ */ new Map();
-        for (const [k, v] of Object.entries(entries)) map.set(k, v);
+        const map = new Map(Object.entries(entries));
         this.data.set(coll, map);
       }
     } catch (e) {
@@ -3161,7 +3249,9 @@ var SqliteStore = class extends Store {
 
 // src/store/index.js
 function createStore(spec = "localstorage", options = {}) {
-  if (spec instanceof MemoryStore) return spec;
+  if (spec instanceof MemoryStore || spec instanceof LocalStorageStore || spec instanceof SqliteStore) {
+    return spec;
+  }
   switch (spec) {
     case "memory":
       return new MemoryStore();

@@ -14,7 +14,10 @@ export { SqliteStore } from './sqlite.js';
  *   - any Store instance (returned as-is)
  */
 export function createStore(spec = 'localstorage', options = {}) {
-  if (spec instanceof MemoryStore) return spec;
+  // Any Store instance (memory, localStorage, sqlite) is passed through.
+  if (spec instanceof MemoryStore || spec instanceof LocalStorageStore || spec instanceof SqliteStore) {
+    return spec;
+  }
   switch (spec) {
     case 'memory':
       return new MemoryStore();

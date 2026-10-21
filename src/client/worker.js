@@ -22,18 +22,20 @@ export class ConductorWorker {
     pollInterval = 1000,
     executeTask = null,
     client = null,
+    onTaskComplete = null,
   }) {
     this.taskType = taskType;
+    this.baseURL = baseURL;
     this.workerId = workerId || `worker-${Math.random().toString(36).slice(2, 8)}`;
     this.domain = domain;
     this.concurrency = concurrency;
     this.pollInterval = pollInterval;
     this.executeTask = executeTask;
     this.client = client;
+    this.onTaskComplete = onTaskComplete;
     this._running = false;
     this._timer = null;
     this._inflight = 0;
-    this.onTaskComplete = null;
   }
 
   _ensureClient() {

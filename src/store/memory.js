@@ -14,6 +14,7 @@
 
 export class Store {
   async init() {}
+  async reload() {}
   async get() { return undefined; }
   async put() {}
   async delete() {}

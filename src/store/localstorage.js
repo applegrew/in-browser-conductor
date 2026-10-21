@@ -24,14 +24,18 @@ export class LocalStorageStore extends Store {
   }
 
   async init() {
+    await this.reload();
+  }
+
+  async reload() {
     if (!this.storage) return;
     const raw = this.storage.getItem(this.storageKey);
+    this.data = createCollections();
     if (!raw) return;
     try {
       const parsed = JSON.parse(raw);
       for (const [coll, entries] of Object.entries(parsed || {})) {
-        const map = new Map();
-        for (const [k, v] of Object.entries(entries)) map.set(k, v);
+        const map = new Map(Object.entries(entries));
         this.data.set(coll, map);
       }
     } catch (e) {

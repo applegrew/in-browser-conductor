@@ -442,7 +442,10 @@ const handlers = {
     if (!h) throw new NotFoundError(`Event handler not found: ${c.params.event}`);
     return json(200, h);
   },
-  registerEventHandler: async (c) => empty(200),
+  registerEventHandler: async (c) => {
+    const handler = await c.server.registerEventHandler(c.json());
+    return empty(200);
+  },
   deleteEventHandler: async (c) => {
     await c.server.deleteEventHandler(c.params.event);
     return empty(200);
@@ -499,7 +502,7 @@ export async function handleHttpRequest(request, server, { basePath = '/api' } =
 }
 
 export function toErrorResponse(e) {
-  const status = e instanceof ConductorError ? e.status : e instanceof ApplicationException ? 500 : 500;
+  const status = e && e.status ? e.status : 500;
   const message = e && e.message ? e.message : String(e);
   const body = { status, message };
   if (e && e.code) body.code = e.code;

@@ -46,6 +46,14 @@
     client = installed.client;
     server = installed.server;
 
+    // Re-read shared storage whenever another tab writes to it, so the control
+    // plane reflects external changes instead of a load-time snapshot.
+    window.addEventListener('storage', (e) => {
+      if (e.key && e.key.startsWith('conductor.')) {
+        server.reload().then(() => render());
+      }
+    });
+
     engineStatus.classList.add('ready');
     engineStatus.querySelector('span:last-child').textContent = 'engine ready';
 
@@ -169,6 +177,7 @@
   async function loadExecutions() {
     const table = document.getElementById('exec-table');
     if (!table) return;
+    if (server && typeof server.reload === 'function') await server.reload();
     const clauses = [];
     if (execState.name) clauses.push(`workflowType = '${execState.name}'`);
     if (execState.status) clauses.push(`status = '${execState.status}'`);
@@ -225,6 +234,7 @@
   async function renderWorkflowDetail(id) {
     currentView = 'workflow';
     content.innerHTML = `<div class="loading">Loading workflow…</div>`;
+    if (server && typeof server.reload === 'function') await server.reload();
     let wf;
     try {
       wf = await client.workflowResource.getWorkflow(id, true);

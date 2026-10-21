@@ -648,6 +648,23 @@ npm run serve     # http://localhost:4173  (demo + control plane)
 - **`EXCLUSIVE_JOIN`, `DO_WHILE`, `DYNAMIC_FORK`, `JSON_JQ_TRANSFORM`, `EVENT`**
   are implemented for the common cases; edge-case semantics may differ from a
   full Conductor deployment.
+- **`install()`** takes **`storeOptions`** (not `storageOptions`): pass
+  `{ storageKey, storage, debounceMs }` for the `localStorage` store, or
+  `{ wasmUrl }` for `sqlite`.
+- **Persistence timing.** `LocalStorageStore` with `debounceMs > 0` delays the
+  write; call `await store.flush()` on `pagehide`/`beforeunload` to avoid losing
+  un-flushed state on reload.
+- **Reload leaves in-flight work stranded.** A task a worker has already polled
+  (and is `IN_PROGRESS`) is not re-queued on reload, so it stays stuck unless its
+  taskdef has `timeoutSeconds` + `timeoutPolicy: RETRY`. Set those on every
+  worker taskdef.
+- **`includeClosed`** on the correlation lookup returns only `RUNNING`
+  workflows when `false` (it does not include `PAUSED`), while `FAIL_ON_RUNNING`
+  idempotency blocks on both `RUNNING` and `PAUSED`.
+- **`sqlite` store** returns JSON-parsed copies from `get()` (the `memory` and
+  `localStorage` stores return live references). Prefer those backends for the
+  demo; the engine is tested against them.
+- **`DECISION`** is accepted as an alias for `SWITCH`.
 
 ---
 
