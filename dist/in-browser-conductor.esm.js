@@ -7,6 +7,7 @@ var __export = (target, all) => {
 // src/enums.js
 var enums_exports = {};
 __export(enums_exports, {
+  IdempotencyStrategy: () => IdempotencyStrategy,
   OPERATOR_TASK_TYPES: () => OPERATOR_TASK_TYPES,
   RetryLogic: () => RetryLogic,
   SYSTEM_TASK_TYPES: () => SYSTEM_TASK_TYPES,
@@ -67,6 +68,11 @@ var TimeoutPolicy = {
   RETRY: "RETRY",
   TIME_OUT_WF: "TIME_OUT_WF",
   ALERT_ONLY: "ALERT_ONLY"
+};
+var IdempotencyStrategy = {
+  FAIL: "FAIL",
+  RETURN_EXISTING: "RETURN_EXISTING",
+  FAIL_ON_RUNNING: "FAIL_ON_RUNNING"
 };
 var OPERATOR_TASK_TYPES = /* @__PURE__ */ new Set([
   TaskType.FORK_JOIN,
@@ -311,6 +317,7 @@ function createWorkflowInstance(def, request) {
     workflowName: def.name,
     workflowVersion: def.version,
     correlationId: request.correlationId || void 0,
+    idempotencyKey: request.idempotencyKey || void 0,
     parentWorkflowId: request.parentWorkflowId,
     parentWorkflowTaskId: request.parentWorkflowTaskId,
     reRunFromWorkflowId: request.reRunFromWorkflowId,
@@ -916,6 +923,7 @@ var ConductorServer = class {
     this._subscribers = /* @__PURE__ */ new Set();
     this._deciding = /* @__PURE__ */ new Set();
     this._pendingDecide = /* @__PURE__ */ new Set();
+    this._idempotencyIndex = /* @__PURE__ */ new Map();
   }
   async init() {
     await this.store.init();
@@ -927,6 +935,7 @@ var ConductorServer = class {
       for (const t of wf.tasks || []) {
         this._indexTask(t);
       }
+      if (wf.idempotencyKey) this._indexIdempotencyKey(wf);
     }
     const handlers2 = await this.store.list("eventHandlers");
     for (const h of handlers2) this._eventHandlers.set(h.name, h);
@@ -1071,11 +1080,68 @@ var ConductorServer = class {
       def = await this.getWorkflowDef(request.name, request.version);
       if (!def) throw new ApplicationException(`No workflow defined with name ${request.name}, version ${request.version ?? "latest"}`);
     }
+    if (request.idempotencyKey) {
+      const existing = await this._checkIdempotency(def.name, request.idempotencyKey, request.idempotencyStrategy);
+      if (existing) return existing;
+    }
     const wf = createWorkflowInstance(def, request);
     await this.store.put("workflows", wf.workflowId, wf);
+    if (wf.idempotencyKey) this._indexIdempotencyKey(wf);
     this._emit("workflow.started", { workflowId: wf.workflowId, name: wf.workflowName });
     await this._decide(wf.workflowId);
     return wf.workflowId;
+  }
+  _idempotencyKey(name, key) {
+    return `${name}:${key}`;
+  }
+  _indexIdempotencyKey(wf) {
+    const k = this._idempotencyKey(wf.workflowName, wf.idempotencyKey);
+    const list = this._idempotencyIndex.get(k) || [];
+    if (!list.includes(wf.workflowId)) list.push(wf.workflowId);
+    this._idempotencyIndex.set(k, list);
+  }
+  _unindexIdempotencyKey(wf) {
+    const k = this._idempotencyKey(wf.workflowName, wf.idempotencyKey);
+    const list = (this._idempotencyIndex.get(k) || []).filter((id) => id !== wf.workflowId);
+    if (list.length) this._idempotencyIndex.set(k, list);
+    else this._idempotencyIndex.delete(k);
+  }
+  /**
+   * Apply Conductor's idempotency strategy. Returns an existing workflow id
+   * for RETURN_EXISTING, or null when a new execution should be started.
+   * Throws ConflictError (409) for FAIL / FAIL_ON_RUNNING conflicts.
+   */
+  async _checkIdempotency(name, idempotencyKey, idempotencyStrategy) {
+    const strategy = idempotencyStrategy || IdempotencyStrategy.FAIL;
+    if (![IdempotencyStrategy.FAIL, IdempotencyStrategy.RETURN_EXISTING, IdempotencyStrategy.FAIL_ON_RUNNING].includes(strategy)) {
+      throw new BadRequestError(`Invalid idempotencyStrategy: ${idempotencyStrategy}`);
+    }
+    const ids = this._idempotencyIndex.get(this._idempotencyKey(name, idempotencyKey)) || [];
+    const existing = [];
+    for (const id of ids) {
+      const wf = await this.store.get("workflows", id);
+      if (wf) existing.push(wf);
+    }
+    if (strategy === IdempotencyStrategy.RETURN_EXISTING) {
+      return existing.length ? existing[0].workflowId : null;
+    }
+    if (strategy === IdempotencyStrategy.FAIL) {
+      if (existing.length) {
+        throw new ConflictError(
+          `Workflow with idempotencyKey '${idempotencyKey}' is already running or completed`
+        );
+      }
+      return null;
+    }
+    const running = existing.filter(
+      (wf) => wf.status === WorkflowStatus.RUNNING || wf.status === WorkflowStatus.PAUSED
+    );
+    if (running.length) {
+      throw new ConflictError(
+        `Workflow with idempotencyKey '${idempotencyKey}' is already running`
+      );
+    }
+    return null;
   }
   async executeWorkflow(request, { waitForSeconds = 10, waitUntilTaskRef = null } = {}) {
     const workflowId = await this.startWorkflow(request);
@@ -1292,6 +1358,7 @@ var ConductorServer = class {
     if (wf) {
       for (const t of wf.tasks || []) this._tasks.delete(t.taskId);
       this._removeFromQueues(wf);
+      if (wf.idempotencyKey) this._unindexIdempotencyKey(wf);
       await this.store.delete("workflows", id);
     }
   }
@@ -2167,6 +2234,18 @@ var Ctx = class {
   text() {
     return this.body || "";
   }
+  /** Case-insensitive header lookup. Handles plain objects and Headers. */
+  header(name) {
+    const needle = String(name).toLowerCase();
+    const src = this.headers || {};
+    if (typeof src.get === "function") {
+      return src.get(needle) ?? src.get(name) ?? void 0;
+    }
+    for (const key of Object.keys(src)) {
+      if (String(key).toLowerCase() === needle) return src[key];
+    }
+    return void 0;
+  }
 };
 var send = (status, body, contentType) => ({
   status,
@@ -2248,7 +2327,9 @@ var handlers = {
       version: c.query.version != null ? Number(c.query.version) : void 0,
       correlationId: c.query.correlationId,
       priority: c.query.priority != null ? Number(c.query.priority) : void 0,
-      input: body
+      input: body,
+      idempotencyKey: c.header("x-idempotency-key") || void 0,
+      idempotencyStrategy: c.header("x-on-conflict") || void 0
     });
     return text(200, id);
   },
@@ -2595,6 +2676,17 @@ var WorkflowResource = class {
   }
   getRunningWorkflow(name, version, startTime, endTime) {
     return this.c.request("GET", `/workflow/running/${encodeURIComponent(name)}`, { query: { version, startTime, endTime } });
+  }
+  getWorkflows(name, correlationId, includeClosed = false, includeTasks = false) {
+    return this.c.request("GET", `/workflow/${encodeURIComponent(name)}/correlated/${encodeURIComponent(correlationId)}`, {
+      query: { includeClosed, includeTasks }
+    });
+  }
+  getWorkflowsByCorrelationIds(name, correlationIds, includeClosed = false, includeTasks = false) {
+    return this.c.request("POST", `/workflow/${encodeURIComponent(name)}/correlated`, {
+      body: correlationIds,
+      query: { includeClosed, includeTasks }
+    });
   }
   pause(workflowId) {
     return this.c.request("PUT", `/workflow/${workflowId}/pause`);
@@ -3072,7 +3164,8 @@ function patchFetch(server, { basePath = "/api" } = {}) {
         if (body != null && typeof body !== "string") {
           body = typeof body === "object" ? JSON.stringify(body) : String(body);
         }
-        const res = await handleHttpRequest({ method, url: u.href, body }, server, { basePath });
+        const headers = init && init.headers || input && input.headers || {};
+        const res = await handleHttpRequest({ method, url: u.href, body, headers }, server, { basePath });
         return toFetchResponse(res);
       }
     } catch (e) {

@@ -90,6 +90,16 @@ class WorkflowResource {
   getRunningWorkflow(name, version, startTime, endTime) {
     return this.c.request('GET', `/workflow/running/${encodeURIComponent(name)}`, { query: { version, startTime, endTime } });
   }
+  getWorkflows(name, correlationId, includeClosed = false, includeTasks = false) {
+    return this.c.request('GET', `/workflow/${encodeURIComponent(name)}/correlated/${encodeURIComponent(correlationId)}`, {
+      query: { includeClosed, includeTasks },
+    });
+  }
+  getWorkflowsByCorrelationIds(name, correlationIds, includeClosed = false, includeTasks = false) {
+    return this.c.request('POST', `/workflow/${encodeURIComponent(name)}/correlated`, {
+      body: correlationIds, query: { includeClosed, includeTasks },
+    });
+  }
   pause(workflowId) { return this.c.request('PUT', `/workflow/${workflowId}/pause`); }
   resume(workflowId) { return this.c.request('PUT', `/workflow/${workflowId}/resume`); }
   restart(workflowId, useLatestDefinitions = false) {

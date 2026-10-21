@@ -60,6 +60,12 @@ export const TimeoutPolicy = {
   ALERT_ONLY: 'ALERT_ONLY',
 };
 
+export const IdempotencyStrategy = {
+  FAIL: 'FAIL',
+  RETURN_EXISTING: 'RETURN_EXISTING',
+  FAIL_ON_RUNNING: 'FAIL_ON_RUNNING',
+};
+
 /** System / operator task types that the engine executes itself. */
 export const OPERATOR_TASK_TYPES = new Set([
   TaskType.FORK_JOIN,

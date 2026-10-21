@@ -263,6 +263,12 @@ semantics automatically.
 // Start (async) — returns the workflow id.
 const id = await client.workflowResource.startWorkflow({ name: 'mail_a_box', version: 1, input: { accountNumber: 'ACC-1' } });
 
+// Idempotent start — same key returns the same execution.
+const id2 = await client.workflowResource.startWorkflow({
+  name: 'mail_a_box', version: 1, input: { accountNumber: 'ACC-1' },
+  idempotencyKey: 'ACC-1', idempotencyStrategy: 'RETURN_EXISTING',
+});
+
 // Start and wait for completion (synchronous execution).
 const result = await client.workflowResource.executeWorkflow('mail_a_box', 1, { accountNumber: 'ACC-1' }, { waitForSeconds: 30 });
 
@@ -270,6 +276,10 @@ const result = await client.workflowResource.executeWorkflow('mail_a_box', 1, { 
 const wf = await client.workflowResource.getWorkflow(id, true);
 const status = await client.workflowResource.getWorkflowStatus(id);
 const tasks = await client.workflowResource.getWorkflowTasks(id);
+
+// Look up executions by correlation id (single / batch).
+const correlated = await client.workflowResource.getWorkflows('mail_a_box', 'order-123', true, false);
+const byIds = await client.workflowResource.getWorkflowsByCorrelationIds('mail_a_box', ['order-123', 'order-456'], true, false);
 
 // Manage.
 await client.workflowResource.pause(id);
@@ -290,7 +300,7 @@ await client.workflowResource.search({ query: "workflowType = 'mail_a_box' AND s
 | Resource | Methods |
 | --- | --- |
 | `client.metadataResource` | `registerWorkflowDef`, `updateWorkflowDefs`, `getWorkflowDef`, `getAllWorkflowDefs`, `unregisterWorkflowDef`, `registerTaskDefs`, `updateTaskDef`, `getTaskDef`, `getAllTaskDefs`, `unregisterTaskDef` |
-| `client.workflowResource` | `startWorkflow`, `startWorkflowByName`, `executeWorkflow`, `getWorkflow`, `getWorkflowStatus`, `getWorkflowTasks`, `getRunningWorkflow`, `pause`, `resume`, `restart`, `retry`, `rerun`, `terminate`, `remove`, `search` |
+| `client.workflowResource` | `startWorkflow`, `startWorkflowByName`, `executeWorkflow`, `getWorkflow`, `getWorkflowStatus`, `getWorkflowTasks`, `getRunningWorkflow`, `getWorkflows`, `getWorkflowsByCorrelationIds`, `pause`, `resume`, `restart`, `retry`, `rerun`, `terminate`, `remove`, `search` |
 | `client.taskResource` | `getTask`, `poll`, `batchPoll`, `updateTask`, `updateTaskV2`, `updateTaskByRef`, `log`, `getLogs`, `search` |
 | `client.queueResource` | `getQueueSizes` |
 | `client.eventResource` | `registerHandler`, `getHandlers`, `getHandler`, `unregisterHandler` |
@@ -324,6 +334,22 @@ POST /workflow                                 start (async) → plain-text id
 POST /workflow/{name}                          start by name (input as body)
 POST /workflow/execute/{name}/{version}        start + wait for completion
 ```
+
+`POST /workflow` accepts a `StartWorkflowRequest` body. In addition to
+`name`, `version`, `input`, `correlationId`, `priority`, `taskToDomain`, and
+`workflowDef`, it supports Conductor's idempotency fields:
+
+| Field | Values | Meaning |
+| --- | --- | --- |
+| `idempotencyKey` | string | User-generated key, scoped to the workflow name, that deduplicates executions. |
+| `idempotencyStrategy` | `FAIL`, `RETURN_EXISTING`, `FAIL_ON_RUNNING` | How to behave when a workflow with the same key already exists. |
+
+- `FAIL` (default) — start only if no execution with the key exists (running or completed); otherwise `409`.
+- `RETURN_EXISTING` — return the existing workflow's id instead of starting a new one.
+- `FAIL_ON_RUNNING` — only `RUNNING`/`PAUSED` executions conflict; terminal executions can run again.
+
+The path form `POST /workflow/{name}` accepts the same values via the
+`X-Idempotency-key` and `X-on-conflict` headers.
 
 **Workflow management**
 ```

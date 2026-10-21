@@ -49,6 +49,7 @@ export function createWorkflowInstance(def, request) {
     workflowName: def.name,
     workflowVersion: def.version,
     correlationId: request.correlationId || undefined,
+    idempotencyKey: request.idempotencyKey || undefined,
     parentWorkflowId: request.parentWorkflowId,
     parentWorkflowTaskId: request.parentWorkflowTaskId,
     reRunFromWorkflowId: request.reRunFromWorkflowId,

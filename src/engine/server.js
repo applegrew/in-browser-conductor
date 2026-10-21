@@ -1,4 +1,4 @@
-import { WorkflowStatus, TaskStatus, TaskType, TimeoutPolicy } from '../enums.js';
+import { WorkflowStatus, TaskStatus, TaskType, TimeoutPolicy, IdempotencyStrategy } from '../enums.js';
 import { uuid } from '../ids.js';
 import { Decider } from './decider.js';
 import {
@@ -27,6 +27,7 @@ import {
   executeHttp,
 } from './system-tasks.js';
 import { ApplicationException } from '../errors.js';
+import { ConflictError, BadRequestError } from '../errors.js';
 
 const MAX_DECIDE_STEPS = 10000;
 
@@ -54,6 +55,7 @@ export class ConductorServer {
     this._subscribers = new Set();
     this._deciding = new Set(); // workflowIds currently being decided
     this._pendingDecide = new Set(); // workflowIds that need a re-decide
+    this._idempotencyIndex = new Map(); // `${name}:${idempotencyKey}` -> workflowId[]
   }
 
   async init() {
@@ -67,6 +69,7 @@ export class ConductorServer {
       for (const t of wf.tasks || []) {
         this._indexTask(t);
       }
+      if (wf.idempotencyKey) this._indexIdempotencyKey(wf);
     }
     const handlers = await this.store.list('eventHandlers');
     for (const h of handlers) this._eventHandlers.set(h.name, h);
@@ -239,11 +242,77 @@ export class ConductorServer {
       if (!def) throw new ApplicationException(`No workflow defined with name ${request.name}, version ${request.version ?? 'latest'}`);
     }
 
+    // Idempotency: dedupe by (workflow name, idempotencyKey).
+    if (request.idempotencyKey) {
+      const existing = await this._checkIdempotency(def.name, request.idempotencyKey, request.idempotencyStrategy);
+      if (existing) return existing;
+    }
+
     const wf = createWorkflowInstance(def, request);
     await this.store.put('workflows', wf.workflowId, wf);
+    if (wf.idempotencyKey) this._indexIdempotencyKey(wf);
     this._emit('workflow.started', { workflowId: wf.workflowId, name: wf.workflowName });
     await this._decide(wf.workflowId);
     return wf.workflowId;
+  }
+
+  _idempotencyKey(name, key) {
+    return `${name}:${key}`;
+  }
+
+  _indexIdempotencyKey(wf) {
+    const k = this._idempotencyKey(wf.workflowName, wf.idempotencyKey);
+    const list = this._idempotencyIndex.get(k) || [];
+    if (!list.includes(wf.workflowId)) list.push(wf.workflowId);
+    this._idempotencyIndex.set(k, list);
+  }
+
+  _unindexIdempotencyKey(wf) {
+    const k = this._idempotencyKey(wf.workflowName, wf.idempotencyKey);
+    const list = (this._idempotencyIndex.get(k) || []).filter((id) => id !== wf.workflowId);
+    if (list.length) this._idempotencyIndex.set(k, list);
+    else this._idempotencyIndex.delete(k);
+  }
+
+  /**
+   * Apply Conductor's idempotency strategy. Returns an existing workflow id
+   * for RETURN_EXISTING, or null when a new execution should be started.
+   * Throws ConflictError (409) for FAIL / FAIL_ON_RUNNING conflicts.
+   */
+  async _checkIdempotency(name, idempotencyKey, idempotencyStrategy) {
+    const strategy = idempotencyStrategy || IdempotencyStrategy.FAIL;
+    if (![IdempotencyStrategy.FAIL, IdempotencyStrategy.RETURN_EXISTING, IdempotencyStrategy.FAIL_ON_RUNNING].includes(strategy)) {
+      throw new BadRequestError(`Invalid idempotencyStrategy: ${idempotencyStrategy}`);
+    }
+
+    const ids = this._idempotencyIndex.get(this._idempotencyKey(name, idempotencyKey)) || [];
+    const existing = [];
+    for (const id of ids) {
+      const wf = await this.store.get('workflows', id);
+      if (wf) existing.push(wf);
+    }
+
+    if (strategy === IdempotencyStrategy.RETURN_EXISTING) {
+      return existing.length ? existing[0].workflowId : null;
+    }
+    if (strategy === IdempotencyStrategy.FAIL) {
+      if (existing.length) {
+        throw new ConflictError(
+          `Workflow with idempotencyKey '${idempotencyKey}' is already running or completed`
+        );
+      }
+      return null;
+    }
+    // FAIL_ON_RUNNING: only RUNNING or PAUSED executions block a new start.
+    const running = existing.filter(
+      (wf) => wf.status === WorkflowStatus.RUNNING || wf.status === WorkflowStatus.PAUSED
+    );
+    if (running.length) {
+      throw new ConflictError(
+        `Workflow with idempotencyKey '${idempotencyKey}' is already running`
+      );
+    }
+    return null;
   }
 
   async executeWorkflow(request, { waitForSeconds = 10, waitUntilTaskRef = null } = {}) {
@@ -488,6 +557,7 @@ export class ConductorServer {
     if (wf) {
       for (const t of wf.tasks || []) this._tasks.delete(t.taskId);
       this._removeFromQueues(wf);
+      if (wf.idempotencyKey) this._unindexIdempotencyKey(wf);
       await this.store.delete('workflows', id);
     }
   }

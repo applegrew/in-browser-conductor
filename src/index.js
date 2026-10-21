@@ -59,7 +59,8 @@ export function patchFetch(server, { basePath = '/api' } = {}) {
         if (body != null && typeof body !== 'string') {
           body = typeof body === 'object' ? JSON.stringify(body) : String(body);
         }
-        const res = await handleHttpRequest({ method, url: u.href, body }, server, { basePath });
+        const headers = (init && init.headers) || (input && input.headers) || {};
+        const res = await handleHttpRequest({ method, url: u.href, body, headers }, server, { basePath });
         return toFetchResponse(res);
       }
     } catch (e) {

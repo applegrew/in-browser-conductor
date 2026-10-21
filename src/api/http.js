@@ -152,6 +152,18 @@ class Ctx {
   text() {
     return this.body || '';
   }
+  /** Case-insensitive header lookup. Handles plain objects and Headers. */
+  header(name) {
+    const needle = String(name).toLowerCase();
+    const src = this.headers || {};
+    if (typeof src.get === 'function') {
+      return src.get(needle) ?? src.get(name) ?? undefined;
+    }
+    for (const key of Object.keys(src)) {
+      if (String(key).toLowerCase() === needle) return src[key];
+    }
+    return undefined;
+  }
 }
 
 const send = (status, body, contentType) => ({
@@ -244,6 +256,8 @@ const handlers = {
       correlationId: c.query.correlationId,
       priority: c.query.priority != null ? Number(c.query.priority) : undefined,
       input: body,
+      idempotencyKey: c.header('x-idempotency-key') || undefined,
+      idempotencyStrategy: c.header('x-on-conflict') || undefined,
     });
     return text(200, id);
   },
