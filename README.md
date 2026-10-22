@@ -351,6 +351,14 @@ POST /workflow/execute/{name}/{version}        start + wait for completion
 The path form `POST /workflow/{name}` accepts the same values via the
 `X-Idempotency-key` and `X-on-conflict` headers.
 
+> **Note on OSS parity.** Upstream Conductor OSS declares `idempotencyKey` /
+> `idempotencyStrategy` but does not currently enforce them over the public
+> REST surface (see conductor-oss issue #1527); the strategy semantics are
+> documented by Orkes. This engine implements and enforces all three strategies
+> — a deliberate, stricter divergence — and the check-and-reserve is atomic
+> (no `await` between decide and reserve), so concurrent starts with the same
+> key cannot both create a workflow.
+
 **Workflow management**
 ```
 GET    /workflow/{workflowId}                  (?includeTasks=true)

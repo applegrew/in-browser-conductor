@@ -1204,6 +1204,12 @@ var InBrowserConductor = (() => {
      * existing workflow for RETURN_EXISTING, or null when the caller should
      * proceed (the key has been reserved for the supplied new workflow id).
      * Throws ConflictError (409) for FAIL / FAIL_ON_RUNNING conflicts.
+     *
+     * The entire body is synchronous (no `await`): in a single-threaded runtime
+     * this makes check-and-reserve one atomic block, mirroring Conductor OSS's
+     * `executionLockService` held across check-and-create. Statuses are read via
+     * `store.getSync`, so `FAIL_ON_RUNNING` never awaits between deciding and
+     * reserving.
      */
     async _acquireIdempotency(name, idempotencyKey, idempotencyStrategy, workflowId) {
       const strategy = idempotencyStrategy || IdempotencyStrategy.FAIL;
@@ -1221,18 +1227,13 @@ var InBrowserConductor = (() => {
           );
         }
       } else {
-        const existing = [];
         for (const id of ids) {
-          const wf = await this.store.get("workflows", id);
-          if (wf) existing.push(wf);
-        }
-        const running = existing.filter(
-          (wf) => wf.status === WorkflowStatus.RUNNING || wf.status === WorkflowStatus.PAUSED
-        );
-        if (running.length) {
-          throw new ConflictError(
-            `Workflow with idempotencyKey '${idempotencyKey}' is already running`
-          );
+          const wf = this.store.getSync("workflows", id);
+          if (!wf || wf.status === WorkflowStatus.RUNNING || wf.status === WorkflowStatus.PAUSED) {
+            throw new ConflictError(
+              `Workflow with idempotencyKey '${idempotencyKey}' is already running`
+            );
+          }
         }
       }
       const current = this._idempotencyIndex.get(mapKey) || [];
@@ -2992,6 +2993,9 @@ var InBrowserConductor = (() => {
     async get() {
       return void 0;
     }
+    getSync() {
+      return void 0;
+    }
     async put() {
     }
     async delete() {
@@ -3017,6 +3021,9 @@ var InBrowserConductor = (() => {
     async init() {
     }
     async get(collection, key) {
+      return this._coll(collection).get(key);
+    }
+    getSync(collection, key) {
       return this._coll(collection).get(key);
     }
     async put(collection, key, value) {
@@ -3088,6 +3095,9 @@ var InBrowserConductor = (() => {
       }
     }
     async get(collection, key) {
+      return this._coll(collection).get(key);
+    }
+    getSync(collection, key) {
       return this._coll(collection).get(key);
     }
     async put(collection, key, value) {
@@ -3213,6 +3223,12 @@ var InBrowserConductor = (() => {
       if (this._persistHook) this._persistHook();
     }
     async get(collection, key) {
+      return this._getSync(collection, key);
+    }
+    getSync(collection, key) {
+      return this._getSync(collection, key);
+    }
+    _getSync(collection, key) {
       const stmt = this.db.prepare("SELECT json FROM docs WHERE collection = ? AND key = ?");
       stmt.bind([collection, key]);
       const row = stmt.step() ? stmt.getAsObject() : null;

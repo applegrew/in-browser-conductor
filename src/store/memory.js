@@ -16,6 +16,7 @@ export class Store {
   async init() {}
   async reload() {}
   async get() { return undefined; }
+  getSync() { return undefined; }
   async put() {}
   async delete() {}
   async list() { return []; }
@@ -42,6 +43,10 @@ export class MemoryStore extends Store {
   async init() {}
 
   async get(collection, key) {
+    return this._coll(collection).get(key);
+  }
+
+  getSync(collection, key) {
     return this._coll(collection).get(key);
   }
 

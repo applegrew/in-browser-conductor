@@ -114,6 +114,14 @@ export class SqliteStore extends Store {
   }
 
   async get(collection, key) {
+    return this._getSync(collection, key);
+  }
+
+  getSync(collection, key) {
+    return this._getSync(collection, key);
+  }
+
+  _getSync(collection, key) {
     const stmt = this.db.prepare('SELECT json FROM docs WHERE collection = ? AND key = ?');
     stmt.bind([collection, key]);
     const row = stmt.step() ? stmt.getAsObject() : null;

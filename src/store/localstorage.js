@@ -69,6 +69,10 @@ export class LocalStorageStore extends Store {
     return this._coll(collection).get(key);
   }
 
+  getSync(collection, key) {
+    return this._coll(collection).get(key);
+  }
+
   async put(collection, key, value) {
     this._coll(collection).set(key, value);
     if (this.debounceMs > 0) this._schedulePersist();
