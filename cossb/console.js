@@ -74,7 +74,20 @@
   }
 
   function statusBadge(status) {
-    return `<span class="status ${esc(status)}">${esc(status)}</span>`;
+    return `<span class="status ${esc(status)}">${esc(humanizeStatus(status))}</span>`;
+  }
+
+  function humanizeStatus(status) {
+    if (!status) return '';
+    return String(status)
+      .toLowerCase()
+      .split('_')
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ');
+  }
+
+  function isTerminalStatus(s) {
+    return s === 'COMPLETED' || s === 'FAILED' || s === 'TIMED_OUT' || s === 'TERMINATED';
   }
 
   function fmtTime(ms) {
@@ -95,15 +108,32 @@
   // ---------------------------------------------------------------------
   async function render() {
     clearInterval(refreshTimer);
+    refreshTimer = null;
     const route = parseRoute();
     const nav = document.querySelectorAll('.nav-item');
     nav.forEach((n) => n.classList.toggle('active', n.dataset.route === navFor(route.name)));
 
-    if (route.name === 'executions') return renderExecutions();
+    if (route.name === 'executions') {
+      await renderExecutions();
+      refreshTimer = setInterval(loadExecutions, 3000);
+      return;
+    }
     if (route.name === 'workflows') return renderWorkflows();
     if (route.name === 'tasks') return renderTasks();
     if (route.name === 'queues') return renderQueues();
-    if (route.name === 'workflow') return renderWorkflowDetail(route.id);
+    if (route.name === 'workflow') {
+      const wf = await renderWorkflowDetail(route.id);
+      if (wf && !isTerminalStatus(wf.status)) {
+        refreshTimer = setInterval(async () => {
+          const current = await renderWorkflowDetail(route.id, false);
+          if (!current || isTerminalStatus(current.status)) {
+            clearInterval(refreshTimer);
+            refreshTimer = null;
+          }
+        }, 3000);
+      }
+      return;
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -171,7 +201,6 @@
     };
 
     await loadExecutions();
-    refreshTimer = setInterval(loadExecutions, 3000);
   }
 
   async function loadExecutions() {
@@ -231,16 +260,16 @@
   // ---------------------------------------------------------------------
   // Workflow detail view
   // ---------------------------------------------------------------------
-  async function renderWorkflowDetail(id) {
+  async function renderWorkflowDetail(id, showLoading = true) {
     currentView = 'workflow';
-    content.innerHTML = `<div class="loading">Loading workflow…</div>`;
+    if (showLoading) content.innerHTML = `<div class="loading">Loading workflow…</div>`;
     if (server && typeof server.reload === 'function') await server.reload();
     let wf;
     try {
       wf = await client.workflowResource.getWorkflow(id, true);
     } catch (e) {
       content.innerHTML = `<div class="page-header"><h1>Execution</h1></div><div class="empty">Not found: ${esc(id)}</div>`;
-      return;
+      return null;
     }
 
     const actions = [
@@ -317,11 +346,11 @@
           else if (act === 'restart') await client.workflowResource.restart(id);
           else if (act === 'remove') { await client.workflowResource.remove(id); navigate(navFor('executions')); return; }
         } catch (e) { alert('Action failed: ' + e.message); }
-        await renderWorkflowDetail(id);
+        await renderWorkflowDetail(id, false);
       };
     });
 
-    refreshTimer = setInterval(() => renderWorkflowDetail(id), 3000);
+    return wf;
   }
 
   // ---------------------------------------------------------------------
